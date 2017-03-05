@@ -7,7 +7,7 @@ import json
 
 import tensorflow as tf
 
-from qa_model import Encoder, QASystem, Decoder
+from qa_model import Encoder, Matcher, QASystem, Decoder
 from os.path import join as pjoin
 
 import logging
@@ -20,7 +20,7 @@ tf.app.flags.DEFINE_float("dropout", 0.15, "Fraction of units randomly dropped o
 tf.app.flags.DEFINE_integer("batch_size", 10, "Batch size to use during training.")
 tf.app.flags.DEFINE_integer("epochs", 10, "Number of epochs to train.")
 tf.app.flags.DEFINE_integer("state_size", 200, "Size of each model layer.")
-tf.app.flags.DEFINE_integer("output_size", 750, "The output size of your model.")
+tf.app.flags.DEFINE_integer("output_size", 264, "The output size of your model.") # originally 750. Should pass in to max_parag_len
 tf.app.flags.DEFINE_integer("embedding_size", 100, "Size of the pretrained vocabulary.")
 tf.app.flags.DEFINE_string("data_dir", "data/squad", "SQuAD directory (default ./data/squad)")
 tf.app.flags.DEFINE_string("train_dir", "train", "Training directory to save the model parameters (default: ./train).")
@@ -75,20 +75,37 @@ def get_normalized_train_dir(train_dir):
     os.symlink(os.path.abspath(train_dir), global_train_dir)
     return global_train_dir
 
+def load_data(path, mode):
+    parag = []
+    ques = []
+    span = []
+    with open(pjoin(FLAGS.data_dir, "{}.ids.context".format(mode)), "r") as f:
+        for line in f:
+            parag.append(map(int, line[:-1].split()))
+    with open(pjoin(FLAGS.data_dir, "{}.ids.question".format(mode), "r") as g:
+        for line in g:
+            ques.append(map(int, line[:-1].split()))
+    with open(pjoin(FLAGS.data_dir, "{}.span".format(mode), "r") as h:
+        for line in h:
+            span.append(map(int, line[:-1].split()))
+    return parag, ques, span
 
 def main(_):
 
     # Do what you need to load datasets from FLAGS.data_dir
-    dataset = None
+    dataset = {"train": load_data(FLAGS.data_dir, mode="train"), \
+               "val": load_data(FLAGS.data_dir, mode="val")}
 
     embed_path = FLAGS.embed_path or pjoin("data", "squad", "glove.trimmed.{}.npz".format(FLAGS.embedding_size))
     vocab_path = FLAGS.vocab_path or pjoin(FLAGS.data_dir, "vocab.dat")
     vocab, rev_vocab = initialize_vocab(vocab_path)
 
-    encoder = Encoder(size=FLAGS.state_size, vocab_dim=FLAGS.embedding_size)
-    decoder = Decoder(output_size=FLAGS.output_size)
+    encoder = Encoder(state_size=FLAGS.state_size, vocab_dim=FLAGS.embedding_size)
+    matcher = Matcher(perspective_dim=50, input_size=FLAGS.state_size) # add flag
+    decoder = Decoder(output_size=FLAGS.output_size, state_size=FLAGS.state_size, n_perspective_dim=50*2) # add flag
 
-    qa = QASystem(encoder, decoder)
+    qa = QASystem(encoder, matcher, decoder, \
+                  vocab=vocab, vocab_dim=vocab_dim, rev_vocab=rev_vocab, embed_path=embed_path)
 
     if not os.path.exists(FLAGS.log_dir):
         os.makedirs(FLAGS.log_dir)
