@@ -124,7 +124,7 @@ def main(_):
         tf.global_variables_initializer().run()
         qa.train(sess, dataset, save_train_dir)
 
-        qa.evaluate_answer(sess, dataset, vocab, FLAGS.evaluate, log=True)
+        qa.evaluate_answer(sess, dataset, 500, log=True)
 
 if __name__ == "__main__":
     tf.app.run()

@@ -9,7 +9,7 @@ import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 from tensorflow.python.ops import variable_scope as vs
-
+from collections import Counter
 from evaluate import exact_match_score, f1_score
 
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +19,7 @@ class Config:
     max_p_len = 264
     max_grad_norm = 10.
     batch_size = 128
-    max_epoch = 3
+    max_epoch = 15
     dropout_keep_prob = 0.85
     embed_size = 100 # should adjust by retrieving embed_size directly
 
@@ -69,7 +69,7 @@ def iterate_across(padded_x, padded_y=None, batch_size=1):
         an iterator across the dataset
     """
     curr = 0
-    data_len = len(padded_y[0])
+    data_len = len(padded_x[0])
     index_shuffler = list(range(data_len))
     random.shuffle(index_shuffler)
     while curr < data_len:
@@ -106,8 +106,8 @@ class Encoder(object):
                  or both.
         """
         with tf.variable_scope("encoder"):
-            cell_fw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.vocab_dim)
-            cell_bw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.vocab_dim)
+            cell_fw = tf.contrib.rnn.GRUCell(self.state_size)
+            cell_bw = tf.contrib.rnn.GRUCell(self.state_size)
             (out_fw, out_bw), (fin_fw, fin_bw) = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs, sequence_length=actual_len, dtype=tf.float32)
             out_fw = tf.nn.dropout(out_fw, keep_prob=Config.dropout_keep_prob)
             out_bw = tf.nn.dropout(out_bw, keep_prob=Config.dropout_keep_prob)
@@ -167,8 +167,8 @@ class Decoder(object):
         """
         with tf.variable_scope("decoder", initializer=tf.contrib.layers.xavier_initializer()):
             initializer = tf.contrib.layers.xavier_initializer()
-            cell_fw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.n_perspective_dim)
-            cell_bw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.n_perspective_dim)
+            cell_fw = tf.contrib.rnn.GRUCell(self.state_size)
+            cell_bw = tf.contrib.rnn.GRUCell(self.state_size)
             (out_fw, out_bw), _ = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, knowledge_rep, sequence_length=actual_len, dtype=tf.float32) # [None x time_step x size]
             outputs = tf.nn.dropout(tf.concat([out_fw, out_bw], axis=2), keep_prob=Config.dropout_keep_prob)
             W = tf.Variable(initializer([self.state_size * 2, 2])) # assert time_step == output_size
@@ -265,7 +265,7 @@ class QASystem(object):
         Loads distributed word representations based on placeholder tokens
         :return:
         """
-        with tf.variable_scope("embeddings"):
+        with tf.variable_scope("embeddings"), tf.device("/cpu:0"):
             embedding_tensor = tf.Variable(np.load(self.embed_path)["glove"].astype(np.float32))
             p_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.p_placeholder)
             self.p = tf.reshape(p_embeddings, [-1, Config.max_p_len, self.embed_size])
@@ -294,7 +294,7 @@ class QASystem(object):
         output_feed = [self.loss]
         outputs = sess.run(output_feed, input_feed)
 
-        return outputs
+        return outputs[0]
 
     def decode(self, sess, test_x):
         """
@@ -321,9 +321,9 @@ class QASystem(object):
         all_a_s = []
         all_a_e = []
         for batch_x in iterate_across(padded_x=test_x, batch_size=Config.batch_size):
-            (a_s, a_e) = self.answer(sess, test_x)
+            (a_s, a_e) = self.answer(sess, batch_x)
             all_a_s += list(a_s)
-            all_a_s += list(a_e)
+            all_a_e += list(a_e)
         return all_a_s, all_a_e
 
     def validate(self, sess, valid_x, valid_y):
@@ -365,13 +365,13 @@ class QASystem(object):
         q, mask_q, actual_q = pad_input(q, Config.max_q_len)
         begin, end = zip(*span)
         # get answer
-        a_s, a_e = answer_all(sess, [p, mask_p, actual_p, q, mask_q, actual_q])
+        a_s, a_e = self.answer_all(sess, [p, mask_p, actual_p, q, mask_q, actual_q])
         for i in range(sample):
             # EM
             em += 1. if a_s[i] == begin[i] and a_e[i] == end[i] else 0.
             # F1
-            pred_ans = p[a_s[i] : a_e[i]+1]
-            actual_ans = p[begin[i] : end[i]+1]
+            pred_ans = p[i][a_s[i] : a_e[i]+1]
+            actual_ans = p[i][begin[i] : end[i]+1]
             common = Counter(pred_ans) & Counter(actual_ans)
             num_same = sum(common.values())
             if num_same > 0:
@@ -442,10 +442,10 @@ class QASystem(object):
             tic_epoch = time.time()
             print("Epoch {}".format(ep))
             train_loss = self.train_epoch(sess, [p, mask_p, actual_p, q, mask_q, actual_q], [begin, end])
-            f1_train, em_train = self.evaluate_answer(sess, dataset, sample=100, log=False, mode='train')
+            f1_train, em_train = self.evaluate_answer(sess, dataset, sample=500, log=False, mode='train')
             print("Train loss: {} Train F1: {} Train EM: {}".format(train_loss, f1_train, em_train))
-            val_loss = self.validate(sess, [p, mask_p, actual_p, q, mask_q, actual_q], [begin_val, end_val])
-            f1_val, em_val = self.evaluate_answer(sess, dataset, sample=100, log=False, mode='val')
+            val_loss = self.validate(sess, [p_val, mask_p_val, actual_p_val, q_val, mask_q_val, actual_q_val], [begin_val, end_val])
+            f1_val, em_val = self.evaluate_answer(sess, dataset, sample=500, log=False, mode='val')
             print("Val loss: {} Val F1: {} Val EM: {}".format(val_loss, f1_val, em_val))
             print("Time taken: {} s".format(time.time() - tic_epoch))
         toc = time.time()
