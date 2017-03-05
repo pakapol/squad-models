@@ -1,4 +1,4 @@
-.p_maskfrom __future__ import absolute_import
+from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
@@ -15,12 +15,12 @@ from evaluate import exact_match_score, f1_score
 logging.basicConfig(level=logging.INFO)
 
 class Config:
-   max_q_len = 24
-   max_p_len = 264
-   batch_size = 64
-   max_epoch = 20
-   dropout_keepprob = 0.5
-   embed_size = 100 # should adjust by retrieving embed_size directly
+    max_q_len = 24
+    max_p_len = 264
+    batch_size = 64
+    max_epoch = 15
+    dropout_keepprob = 0.5
+    embed_size = 100 # should adjust by retrieving embed_size directly
 
 def get_optimizer(opt):
     if opt == "adam":
@@ -147,7 +147,7 @@ class Decoder(object):
             cell_fw = tf.contrib.rnn.GRUCell(state_size, input_size=n_perspective_dim)
             cell_bw = tf.contrib.rnn.GRUCell(state_size, input_size=n_perspective_dim)
             outputs, _ = tf.nn_bidirectional_dynamic_rnn(cell_fw, cell_bw, knowledge_rep, sequence_length=actual_len) # [None x time_step x size]
-            W = tf.Variable(initializer([state_size, 2]))
+            W1 = tf.Variable(initializer([state_size, 2]))
             b = tf.Variable(tf.zeros([1, output_size, 2]))
             score = tf.squeeze(tf.matmul(outputs, W), [2]) + b
         return score # [None x output_size] = [None x time_step x 2]
@@ -213,7 +213,9 @@ class QASystem(object):
         p_outs, p_finals = self.encoder.encode(p, self.p_mask_placeholder, self.p_actual_len_placeholder)
         q_outs, q_finals = self.encoder.encode(q, self.q_mask_placeholder, self.q_actual_len_placeholder)
         m_out = self.matcher.match(p_outs, p_finals, q_outs, q_finals)
-        self.scores = self.decoder.decode(m_out, self.p_actual_len_placeholder)
+        scores = self.decoder.decode(m_out, self.p_actual_len_placeholder)
+        self.begin_score = tf.squeeze(scores[:,:,0], [2])
+        self.end_score = tf.squeeze(scores[:,:,1], [2])
 
     def setup_loss(self):
         """
@@ -221,7 +223,9 @@ class QASystem(object):
         :return:
         """
         with tf.variable_scope("loss"):
-            
+            loss_begin = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.begin_placeholder, logits=self.begin_score)
+            loss_end = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.end_placeholder, logits=self.end_score)
+            self.loss = loss_begin + loss_end
 
     def setup_embeddings(self):
         """
@@ -246,27 +250,22 @@ class QASystem(object):
         opt = get_optimizer("adam")()
         # Gradient clipping here !!!
         train_op = opt.minimize(self.loss)
-        output_feed = [train_op]
+        output_feed = [train_op, self.loss]
         outputs = session.run(output_feed, input_feed)
 
         return outputs
 
-    #def test(self, session, valid_x, valid_y):
-    #    """
-    #    in here you should compute a cost for your validation set
-    #    and tune your hyperparameters according to the validation set performance
-    #    :return:
-    #    """
-    #    input_feed = {}
+    def test(self, session, valid_x, valid_y):
+       """
+       in here you should compute a cost for your validation set
+       and tune your hyperparameters according to the validation set performance
+       :return:
+       """
+       input_feed = self.get_feed_dict(valid_x, valid_y)
+       output_feed = [self.loss]
+       outputs = session.run(output_feed, input_feed)
 
-    #    # fill in this feed_dictionary like:
-    #    # input_feed['valid_x'] = valid_x
-
-    #    output_feed = []
-
-    #    outputs = session.run(output_feed, input_feed)
-
-    #    return outputs
+       return outputs
 
     def decode(self, session, test_x):
         """
@@ -274,13 +273,8 @@ class QASystem(object):
         so that other methods like self.answer() will be able to work properly
         :return:
         """
-        input_feed = {}
-
-        # fill in this feed_dictionary like:
-        # input_feed['test_x'] = test_x
-
-        output_feed = []
-
+        input_feed = self.get_feed_dict(test_x)
+        output_feed = [self.begin_score, self.end_score]
         outputs = session.run(output_feed, input_feed)
 
         return outputs
@@ -288,31 +282,27 @@ class QASystem(object):
     def answer(self, session, test_x):
 
         yp, yp2 = self.decode(session, test_x)
-
         a_s = np.argmax(yp, axis=1)
         a_e = np.argmax(yp2, axis=1)
 
         return (a_s, a_e)
 
-    #def validate(self, sess, valid_dataset):
-    #    """
-    #    Iterate through the validation dataset and determine what
-    #    the validation cost is.
+    def validate(self, sess, valid_dataset):
+        """
+        Iterate through the validation dataset and determine what
+        the validation cost is.
 
-    #    This method calls self.test() which explicitly calculates validation cost.
+        This method calls self.test() which explicitly calculates validation cost.
 
-    #    How you implement this function is dependent on how you design
-    #    your data iteration function
+        How you implement this function is dependent on how you design
+        your data iteration function
 
-    #    :return:
-    #    """
-    #    valid_cost = 0
-
-    #    for valid_x, valid_y in valid_dataset:
-    #      valid_cost = self.test(sess, valid_x, valid_y)
-
-
-    #    return valid_cost
+        :return:
+        """
+        valid_cost = 0
+        for valid_x, valid_y in valid_dataset:
+            valid_cost = self.test(sess, valid_x, valid_y)
+        return valid_cost
 
     def evaluate_answer(self, session, dataset, sample=100, log=False):
         """
@@ -340,7 +330,7 @@ class QASystem(object):
 
     def run_epoch(self, session, data_x, data_y, **kwargs ):
         for batch_x, batch_y in iterate_across(data_x, data_y, Config.batch_size):
-            ?, ?, ?, ? = self.optimize(..., ..) # sess.run([cost, pred, eval_op], feed)
+            ?, ?, ?, ? = self.optimize(session, batch_x, batch_y)
 
 
     def train(self, session, dataset, train_dir):
@@ -383,10 +373,15 @@ class QASystem(object):
         q, mask_q, actual_q = pad_input(q, Config.max_q_len)
         begin, end = zip(*span)
         # 2. Pad val data
-
+        p_val, q_val, span_val = dataset["val"]
+        p_val, mask_p_val, actual_p_val = pad_input(p_val, Config.max_p_len)
+        q_val, mask_q_val, actual_q_val = pad_input(q_valß, Config.max_q_len)
+        begin_val, end_val = zip(*span_val)
         # 3. iterate, run_epoch
-        #????? = self.run_epoch(session, [p, mask_p, actual_p q, mask_q,, actual_q], [begin, end], ...)
-        # use self.optimize
+        for ep in range(Config.max_epoch):
+            ?? = self.run_epoch(session, [p, mask_p, actual_p q, mask_q, actual_q], [begin, end], ...)
+            ?? = self.run_epoch(session, [p, mask_p, actual_p q, mask_q, actual_q], [begin, end], ...)
+
 
         toc = time.time()
         logging.info("Number of params: %d (retreival took %f secs)" % (num_params, toc - tic))
