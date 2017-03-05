@@ -82,10 +82,10 @@ def load_data(path, mode):
     with open(pjoin(FLAGS.data_dir, "{}.ids.context".format(mode)), "r") as f:
         for line in f:
             parag.append(map(int, line[:-1].split()))
-    with open(pjoin(FLAGS.data_dir, "{}.ids.question".format(mode), "r") as g:
+    with open(pjoin(FLAGS.data_dir, "{}.ids.question".format(mode), "r")) as g:
         for line in g:
             ques.append(map(int, line[:-1].split()))
-    with open(pjoin(FLAGS.data_dir, "{}.span".format(mode), "r") as h:
+    with open(pjoin(FLAGS.data_dir, "{}.span".format(mode), "r")) as h:
         for line in h:
             span.append(map(int, line[:-1].split()))
     return parag, ques, span
