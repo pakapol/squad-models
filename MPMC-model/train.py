@@ -82,10 +82,10 @@ def load_data(path, mode):
     with open(pjoin(FLAGS.data_dir, "{}.ids.context".format(mode)), "r") as f:
         for line in f:
             parag.append(map(int, line[:-1].split()))
-    with open(pjoin(FLAGS.data_dir, "{}.ids.question".format(mode), "r")) as g:
+    with open(pjoin(FLAGS.data_dir, "{}.ids.question".format(mode)), "r") as g:
         for line in g:
             ques.append(map(int, line[:-1].split()))
-    with open(pjoin(FLAGS.data_dir, "{}.span".format(mode), "r")) as h:
+    with open(pjoin(FLAGS.data_dir, "{}.span".format(mode)), "r") as h:
         for line in h:
             span.append(map(int, line[:-1].split()))
     return parag, ques, span
@@ -101,11 +101,11 @@ def main(_):
     vocab, rev_vocab = initialize_vocab(vocab_path)
 
     encoder = Encoder(state_size=FLAGS.state_size, vocab_dim=FLAGS.embedding_size)
-    matcher = Matcher(perspective_dim=50, input_size=FLAGS.state_size) # add flag
+    matcher = Matcher(perspective_dim=25, input_size=FLAGS.state_size) # add flag
     decoder = Decoder(output_size=FLAGS.output_size, state_size=FLAGS.state_size, n_perspective_dim=50*2) # add flag
 
     qa = QASystem(encoder, matcher, decoder, \
-                  vocab=vocab, vocab_dim=vocab_dim, rev_vocab=rev_vocab, embed_path=embed_path)
+                  vocab=vocab, vocab_dim=FLAGS.embedding_size, rev_vocab=rev_vocab, embed_path=embed_path)
 
     if not os.path.exists(FLAGS.log_dir):
         os.makedirs(FLAGS.log_dir)
@@ -121,6 +121,7 @@ def main(_):
         initialize_model(sess, qa, load_train_dir)
 
         save_train_dir = get_normalized_train_dir(FLAGS.train_dir)
+        tf.global_variables_initializer().run()
         qa.train(sess, dataset, save_train_dir)
 
         qa.evaluate_answer(sess, dataset, vocab, FLAGS.evaluate, log=True)

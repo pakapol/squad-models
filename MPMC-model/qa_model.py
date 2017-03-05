@@ -18,8 +18,8 @@ class Config:
     max_q_len = 24
     max_p_len = 264
     max_grad_norm = 10.
-    batch_size = 64
-    max_epoch = 15
+    batch_size = 128
+    max_epoch = 3
     dropout_keep_prob = 0.85
     embed_size = 100 # should adjust by retrieving embed_size directly
 
@@ -56,11 +56,10 @@ def pad_input(unpadded_data, max_length):
         else:
             padded = input_token[:max_length]
             masking = [True] * max_length
-            actual = len(input_token)
-        ret.append((padded, masking, actual))
+        ret.append((padded, masking, len(input_token)))
     return zip(*ret)
 
-def iterator_across(padded_x, padded_y=None, batch_size=1):
+def iterate_across(padded_x, padded_y=None, batch_size=1):
     """
     Iterate across the padded data
     Args:
@@ -97,7 +96,6 @@ class Encoder(object):
         In a generalized encode function, you pass in your inputs,
         masks, and an initial
         hidden state input into this function.
-
         :param inputs: Symbolic representations of your input
         :param masks: this is to make sure tf.nn.dynamic_rnn doesn't iterate
                       through masked steps
@@ -108,12 +106,14 @@ class Encoder(object):
                  or both.
         """
         with tf.variable_scope("encoder"):
-            cell_fw = tf.contrib.rnn.GRUCell(state_size, input_size=vocab_dim)
-            cell_bw = tf.contrib.rnn.GRUCell(state_size, input_size=vocab_dim)
-            outputs, finals = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs, sequence_length=actual_len)
-            outputs = tf.nn.dropout(outputs, keep_prob=Config.dropout_keep_prob)
-            finals = tf.nn.dropout(finals, keep_prob=Config.dropout_keep_prob)
-        return outputs, finals # (out_fwd, out_bwd)
+            cell_fw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.vocab_dim)
+            cell_bw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.vocab_dim)
+            (out_fw, out_bw), (fin_fw, fin_bw) = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs, sequence_length=actual_len, dtype=tf.float32)
+            out_fw = tf.nn.dropout(out_fw, keep_prob=Config.dropout_keep_prob)
+            out_bw = tf.nn.dropout(out_bw, keep_prob=Config.dropout_keep_prob)
+            fin_fw = tf.nn.dropout(fin_fw, keep_prob=Config.dropout_keep_prob)
+            fin_bw = tf.nn.dropout(fin_bw, keep_prob=Config.dropout_keep_prob)
+        return (out_fw, out_bw), (fin_fw, fin_bw) # (out_fwd, out_bwd)
 
 class Matcher(object):
     def __init__(self, perspective_dim, input_size):
@@ -130,19 +130,20 @@ class Matcher(object):
             h1 = tf.expand_dims(h1, 3)
             h2_final = tf.expand_dims(tf.expand_dims(h2_final, 1), 3)
             first = W * h1  # None x T x input_size x perspective_d
-            second = W * h2 # None x 1 x input_size x perspective_d --> none per T 1
+            second = W * h2_final # None x 1 x input_size x perspective_d --> none per T 1
             inner = tf.transpose(tf.matmul(tf.transpose(first,perm=[0,3,1,2]), tf.transpose(second,perm=[0,3,2,1])), perm=[0,2,3,1])
             norms = tf.norm(first, axis=2, keep_dims=True) * tf.norm(second, axis=2, keep_dims=True) # none t 1 oer
             return tf.squeeze(inner / norms, [2])
 
-        with tf.variable_scope("matcher", initializer=tf.contrib.layers.xavier_initializer()):
-            W1 = tf.Variable(initializer([input_size, perspective_dim]))
-            W2 = tf.Variable(initializer([input_size, perspective_dim]))
+        with tf.variable_scope("matcher"):
+            initializer = tf.contrib.layers.xavier_initializer()
+            W1 = tf.Variable(initializer([self.input_size, self.perspective_dim]))
+            W2 = tf.Variable(initializer([self.input_size, self.perspective_dim]))
             p_fw, p_bw = ps # None x time_step x input_size
             q_final_fw, q_final_bw = q_finals # None x input_size
             match_fw = batch_full_match(p_fw, q_final_fw, W1) # None x time_step x perspective_d
             match_bw = batch_full_match(p_bw, q_final_bw, W2) # None x time_step x perspective_d
-            return tf.nn.dropout(tf.concat(match_fw, match_bw, axis=2), keep_prob=Config.dropout_keep_prob)
+            return tf.nn.dropout(tf.concat([match_fw, match_bw], axis=2), keep_prob=Config.dropout_keep_prob)
             # None x time_step x 2*perspective_d
 
 
@@ -160,26 +161,25 @@ class Decoder(object):
         all paragraph tokens on which token should be
         the start of the answer span, and which should be
         the end of the answer span.
-
         :param knowledge_rep: it is a representation of the paragraph and question,
                               decided by how you choose to implement the encoder [None x time_step x n_perspective_dim]
         :return:
         """
-        with tf.variable_scope("decoder", initializer=tf.contrib.layers.xavier_initializer())
-            cell_fw = tf.contrib.rnn.GRUCell(state_size, input_size=n_perspective_dim)
-            cell_bw = tf.contrib.rnn.GRUCell(state_size, input_size=n_perspective_dim)
-            outputs, _ = tf.nn_bidirectional_dynamic_rnn(cell_fw, cell_bw, knowledge_rep, sequence_length=actual_len) # [None x time_step x size]
-            outputs = tf.nn.dropout(outputs, keep_prob=Config.dropout_keep_prob)
-            W1 = tf.Variable(initializer([state_size, 2])) # assert time_step == output_size
-            b = tf.Variable(tf.zeros([1, output_size, 2]))
-            score = tf.squeeze(tf.matmul(outputs, W), [2]) + b
+        with tf.variable_scope("decoder", initializer=tf.contrib.layers.xavier_initializer()):
+            initializer = tf.contrib.layers.xavier_initializer()
+            cell_fw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.n_perspective_dim)
+            cell_bw = tf.contrib.rnn.GRUCell(self.state_size, input_size=self.n_perspective_dim)
+            (out_fw, out_bw), _ = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, knowledge_rep, sequence_length=actual_len, dtype=tf.float32) # [None x time_step x size]
+            outputs = tf.nn.dropout(tf.concat([out_fw, out_bw], axis=2), keep_prob=Config.dropout_keep_prob)
+            W = tf.Variable(initializer([self.state_size * 2, 2])) # assert time_step == output_size
+            b = tf.Variable(tf.zeros([1, self.output_size, 2]))
+            score = tf.reshape(tf.matmul(tf.reshape(outputs, [-1, self.state_size*2]), W), [-1, self.output_size, 2]) + b
         return score # [None x output_size] = [None x time_step x 2]
 
 class QASystem(object):
     def __init__(self, encoder, matcher, decoder, **kwargs):
         """
         Initializes your System
-
         :param encoder: an encoder that you constructed in train.py
         :param decoder: a decoder that you constructed in train.py
         :param args: pass in more arguments as needed
@@ -205,14 +205,24 @@ class QASystem(object):
             self.setup_system()
             self.setup_loss()
 
+
+        # ==== set up training/updating procedure ====
+        optimizer = get_optimizer("adam")() # figure out a way to use adam
+        # Gradient clipping
+        grads_and_vars = optimizer.compute_gradients(self.loss)
+        grads, tvars = zip(*grads_and_vars)
+        grads, _ = tf.clip_by_global_norm(grads, Config.max_grad_norm)
+        self.train_op = optimizer.apply_gradients(zip(grads, tvars))
+        
+
     def get_feed_dict(self, batch_x, batch_y=None):
         p, p_mask, p_actual_len, q, q_mask, q_actual_len = batch_x
         feed_dict = {
             self.p_placeholder: p,
-            self.mask_p_placeholder: p_mask,
+            self.p_mask_placeholder: p_mask,
             self.p_actual_len_placeholder: p_actual_len,
             self.q_placeholder: q,
-            self.q_mask_placeholder: q_mask
+            self.q_mask_placeholder: q_mask,
             self.q_actual_len_placeholder: q_actual_len,
         }
         if batch_y is not None:
@@ -229,14 +239,16 @@ class QASystem(object):
         """
         # p = batch x p_time_step x dim
         # q = batch x q_time_step x dim
-        # r = vath
-        p_filt = tf.reduce_max(tf.matmul(self.p, tf.transpose(self.q, perm=[0,2,1]), axis=2, keep_dims=True))
-        p_outs, p_finals = self.encoder.encode(p_filt, self.p_mask_placeholder, self.p_actual_len_placeholder)
-        q_outs, q_finals = self.encoder.encode(self.q, self.q_mask_placeholder, self.q_actual_len_placeholder)
-        m_out = self.matcher.match(p_outs, p_finals, p_mask, q_outs, q_finals, q_mask)
+        # r = batch x p 
+        p_filt = self.p * tf.reduce_max(tf.matmul(self.p, tf.transpose(self.q, perm=[0,2,1])), axis=2, keep_dims=True)
+        with tf.variable_scope("encoder") as scope:
+            p_outs, p_finals = self.encoder.encode(p_filt, self.p_mask_placeholder, self.p_actual_len_placeholder)
+            scope.reuse_variables()
+            q_outs, q_finals = self.encoder.encode(self.q, self.q_mask_placeholder, self.q_actual_len_placeholder)
+        m_out = self.matcher.match(p_outs, p_finals, self.p_mask_placeholder, q_outs, q_finals, self.q_mask_placeholder)
         scores = self.decoder.decode(m_out, self.p_actual_len_placeholder)
-        self.begin_score = tf.squeeze(scores[:,:,0], [2])
-        self.end_score = tf.squeeze(scores[:,:,1], [2])
+        self.begin_score = scores[:,:,0]
+        self.end_score = scores[:,:,1]
 
     def setup_loss(self):
         """
@@ -254,10 +266,10 @@ class QASystem(object):
         :return:
         """
         with tf.variable_scope("embeddings"):
-            embedding_tensor = tf.Variable(np.load(self.embed_path)["glove"])
+            embedding_tensor = tf.Variable(np.load(self.embed_path)["glove"].astype(np.float32))
             p_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.p_placeholder)
-            p_embeddings = tf.reshape(p_embeddings, [-1, Config.max_p_len, self.embed_size])
-            self.p = tf.nn.embedding_lookup(embedding_tensor, self.q_placeholder)
+            self.p = tf.reshape(p_embeddings, [-1, Config.max_p_len, self.embed_size])
+            q_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.q_placeholder)
             self.q = tf.reshape(q_embeddings, [-1, Config.max_q_len, self.embed_size])
 
     def optimize(self, sess, train_x, train_y):
@@ -267,17 +279,10 @@ class QASystem(object):
         :return:
         """
         input_feed = self.get_feed_dict(train_x, train_y)
-        opt = get_optimizer("adam")()
-        # Gradient clipping here !!!
-        grads_and_vars = optimizer.compute_gradients(self.loss)
-        grads, tvars = zip(*grads_and_vars)
-        grads, _ = tf.clip_by_global_norm(grads, Config.max_grad_norm)
-        train_op = optimizer.apply_gradients(zip(grads, tvars))
+        output_feed = [self.train_op, self.loss]
+        _, loss = sess.run(output_feed, input_feed)
 
-        output_feed = [train_op, self.loss]
-        outputs = sess.run(output_feed, input_feed)
-
-        return outputs
+        return loss
 
     def test(self, sess, valid_x, valid_y):
         """
@@ -325,12 +330,9 @@ class QASystem(object):
         """
         Iterate through the validation dataset and determine what
         the validation cost is.
-
         This method calls self.test() which explicitly calculates validation cost.
-
         How you implement this function is dependent on how you design
         your data iteration function
-
         :return:
         """
         valid_loss = 0
@@ -344,10 +346,8 @@ class QASystem(object):
         """
         Evaluate the model's performance using the harmonic mean of F1 and Exact Match (EM)
         with the set of true answer labels
-
         This step actually takes quite some time. So we can only sample 100 examples
         from either training or testing set.
-
         :param sess: session should always be centrally managed in train.py
         :param dataset: a representation of our data, in some implementations, you can
                         pass in multiple components (arguments) of one dataset to this function
@@ -384,30 +384,32 @@ class QASystem(object):
     def train_epoch(self, sess, data_x, data_y):
         train_loss = 0
         num_iter = 0
+        prev = 0
+        tic = time.time()
         for batch_x, batch_y in iterate_across(data_x, data_y, Config.batch_size):
-            _, this_train_loss = self.optimize(sess, batch_x, batch_y)
+            this_train_loss = self.optimize(sess, batch_x, batch_y)
             train_loss += this_train_loss
-            total += 1
+            num_iter += 1
+            if num_iter >= prev * 2:
+                print("Iteration {} / {}, Average time per iteration = {} s, ETA = {}".format( \
+                num_iter, (len(data_y[0]) - 1) // Config.batch_size + 1,(time.time()-tic) / num_iter,\
+                (time.time()-tic) * ((len(data_y[0]) - 1) // Config.batch_size + 1 - num_iter) / num_iter))
+                prev = num_iter
         return train_loss / num_iter
 
 
     def train(self, sess, dataset, train_dir):
         """
         Implement main training loop
-
         TIPS:
         You should also implement learning rate annealing (look into tf.train.exponential_decay)
         Considering the long time to train, you should save your model per epoch.
-
         More ambitious appoarch can include implement early stopping, or reload
         previous models if they have higher performance than the current one
-
         As suggested in the document, you should evaluate your training progress by
         printing out information every fixed number of iterations.
-
         We recommend you evaluate your model performance on F1 and EM instead of just
         looking at the cost.
-
         :param sess: it should be passed in from train.py
         :param dataset: a representation of our data, in some implementations, you can
                         pass in multiple components (arguments) of one dataset to this function
@@ -439,10 +441,10 @@ class QASystem(object):
         for ep in range(Config.max_epoch):
             tic_epoch = time.time()
             print("Epoch {}".format(ep))
-            train_loss = self.train_epoch(sess, [p, mask_p, actual_p q, mask_q, actual_q], [begin, end])
+            train_loss = self.train_epoch(sess, [p, mask_p, actual_p, q, mask_q, actual_q], [begin, end])
             f1_train, em_train = self.evaluate_answer(sess, dataset, sample=100, log=False, mode='train')
             print("Train loss: {} Train F1: {} Train EM: {}".format(train_loss, f1_train, em_train))
-            val_loss = self.validate(sess, [p, mask_p, actual_p q, mask_q, actual_q], [begin_val, end_val])
+            val_loss = self.validate(sess, [p, mask_p, actual_p, q, mask_q, actual_q], [begin_val, end_val])
             f1_val, em_val = self.evaluate_answer(sess, dataset, sample=100, log=False, mode='val')
             print("Val loss: {} Val F1: {} Val EM: {}".format(val_loss, f1_val, em_val))
             print("Time taken: {} s".format(time.time() - tic_epoch))
