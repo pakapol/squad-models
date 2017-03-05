@@ -1,4 +1,4 @@
-from __future__ import absolute_import
+.p_maskfrom __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
@@ -15,8 +15,8 @@ from evaluate import exact_match_score, f1_score
 logging.basicConfig(level=logging.INFO)
 
 class Config:
-   max_ques_len = 24
-   max_parag_len = 264
+   max_q_len = 24
+   max_p_len = 264
    batch_size = 64
    max_epoch = 20
    dropout_keepprob = 0.5
@@ -39,7 +39,7 @@ def pad_input(unpadded_data, max_length):
               of questions or paragraphs.
               Question and paragraphs are represented by a list of numeric ids.
         max_length: maximum length of the input token. Must be specified in config
-              Generally we should estimate that number before training by looking 
+              Generally we should estimate that number before training by looking
               at the data. In the config, there should be both max_question_len
               and max_paragraph_len. Use those to pass in as this max_length.
     Returns:
@@ -55,7 +55,8 @@ def pad_input(unpadded_data, max_length):
         else:
             padded = input_token[:max_length]
             masking = [True] * max_length
-        ret.append((padded, masking))    
+            actual = len(input_token)
+        ret.append((padded, masking, actual))
     return zip(*ret)
 
 def iterator_across(padded_x, padded_y, batch_size):
@@ -76,7 +77,7 @@ def iterator_across(padded_x, padded_y, batch_size):
                for j in index_shuffler[curr:curr+batch_size]]) \
                for i in range(len(padded_x))], \
               [np.array([padded_y[i][j] \
-               for j in index_shuffler[curr:curr+batch_size]]) \ 
+               for j in index_shuffler[curr:curr+batch_size]]) \
                for i in range(len(padded_y))]
         curr += batch_size
 
@@ -85,7 +86,7 @@ class Encoder(object):
         self.state_size = state_size
         self.vocab_dim = vocab_dim
 
-    def encode(self, inputs, masks):
+    def encode(self, inputs, masks, actual_len):
         """
         In a generalized encode function, you pass in your inputs,
         masks, and an initial
@@ -103,24 +104,24 @@ class Encoder(object):
         with tf.variable_scope("encoder"):
             cell_fw = tf.contrib.rnn.GRUCell(state_size, input_size=vocab_dim)
             cell_bw = tf.contrib.rnn.GRUCell(state_size, input_size=vocab_dim)
-            outputs, _ = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs, parallel_iterations=64)
-        return outputs # (out_fwd, out_bwd)
- 
+            outputs, finals = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, inputs, sequence_length=actual_len)
+        return outputs, finals # (out_fwd, out_bwd)
+
 class Matcher(object):
     def __init__(self, perspective_dim, input_size):
         self.perspective_dim = perspective_dim
         self.input_size = input_size
-
-    def match(self, context, question):
+    def match(self, ps, p_finals, qs, q_finals):
+        def batch_full_match(batch_h1, h2, W):
+            return
         with tf.variable_scope("matcher", initializer=tf.contrib.layers.xavier_initializer()):
             W1 = tf.Variable(initializer([input_size, perspective_dim]))
             W2 = tf.Variable(initializer([input_size, perspective_dim]))
-            context # None x time_step x vocab_d
-            question # None x time_step x vocab_d
-
-            match_fw # None x time_step x per
-            match_bw # None x time_step x per
-            return concated # None x time_step x 2*perspective_d
+            p_fw, p_bw = ps # None x time_step x input_size
+            q_final_fw, q_final_bw = q_finals # None x input_size
+            match_fw = batch_full_match(p_fw, q_final_fw, W1) # None x time_step x perspective_d
+            match_bw = batch_full_match(p_bw, q_final_bw, W2) # None x time_step x perspective_d
+            return tf.concat(match_fw, match_bw, axis=2) # None x time_step x 2*perspective_d
 
 
 class Decoder(object):
@@ -130,7 +131,7 @@ class Decoder(object):
         self.state_size = state_size
         self.n_perspective_dim = n_perspective_dim
 
-    def decode(self, knowledge_rep):
+    def decode(self, knowledge_rep, actual_len):
         """
         takes in a knowledge representation
         and output a probability estimation over
@@ -145,11 +146,11 @@ class Decoder(object):
         with tf.variable_scope("decoder", initializer=tf.contrib.layers.xavier_initializer())
             cell_fw = tf.contrib.rnn.GRUCell(state_size, input_size=n_perspective_dim)
             cell_bw = tf.contrib.rnn.GRUCell(state_size, input_size=n_perspective_dim)
-            outputs, _ = tf.nn_bidirectional_dynamic_rnn(cell_fw, cell_bw, knowledge_rep, parallel_iterations=64) # [None x time_step x size]
-            W = tf.Variable(initializer([state_size, 1]))
-            b = tf.Variable(tf.zeros([1, output_size]))
+            outputs, _ = tf.nn_bidirectional_dynamic_rnn(cell_fw, cell_bw, knowledge_rep, sequence_length=actual_len) # [None x time_step x size]
+            W = tf.Variable(initializer([state_size, 2]))
+            b = tf.Variable(tf.zeros([1, output_size, 2]))
             score = tf.squeeze(tf.matmul(outputs, W), [2]) + b
-        return score # [None x output_size] = [None x time_step]
+        return score # [None x output_size] = [None x time_step x 2]
 
 class QASystem(object):
     def __init__(self, encoder, matcher, decoder, **kwargs):
@@ -166,10 +167,12 @@ class QASystem(object):
         self.matcher = matcher
         self.decoder = decoder
         # ==== set up placeholder tokens ========
-        self.parag_placeholder = tf.placeholder(tf.int32, [None, Config.max_parag_len])
-        self.mask_parag_placeholder = tf.placeholder(tf.bool, [None, Config.max_parag_len])
-        self.ques_placeholder = tf.placeholder(tf.int32, [None, Config.max_ques_len])
-        self.mask_ques_placeholder = tf.placeholder(tf.bool, [None, Config.max_ques_len])
+        self.p_placeholder = tf.placeholder(tf.int32, [None, Config.max_p_len])
+        self.p_mask_placeholder = tf.placeholder(tf.bool, [None, Config.max_p_len])
+        self.p_actual_len_placeholder = tf.placeholder(tf.int32, [None])
+        self.q_placeholder = tf.placeholder(tf.int32, [None, Config.max_q_len])
+        self.q_mask_placeholder = tf.placeholder(tf.bool, [None, Config.max_q_len])
+        self.q_actual_len_placeholder = tf.placeholder(tf.int32, [None])
         self.begin_placeholder = tf.placeholder(tf.int32, [None])
         self.end_placeholder = tf.placeholder(tf.int32, [None])
 
@@ -181,14 +184,16 @@ class QASystem(object):
 
         # ==== set up training/updating procedure ====
         pass
-    
+
     def get_feed_dict(self, batch_x, batch_y=None):
-        parag, parag_mask, ques, ques_mask = batch_x
+        p, p_mask, p_actual_len, q, q_mask, q_actual_len = batch_x
         feed_dict = {
-            self.parag_placeholder: parag,
-            self.mask_parag_placeholder: parag_mask,
-            self.ques_placeholder: ques,
-            self.mask_ques_placeholder: ques_mask
+            self.p_placeholder: p,
+            self.mask_p_placeholder: p_mask,
+            self.p_actual_len_placeholder: p_actual_len,
+            self.q_placeholder: q,
+            self.q_mask_placeholder: q_mask
+            self.q_actual_len_placeholder: q_actual_len,
         }
         if batch_y is not None:
             feed_dict[self.begin_placeholder] = batch_y[0]
@@ -203,10 +208,12 @@ class QASystem(object):
         :return:
         """
         p, q = self.get_embeddings()
-        p_out = self.encoder.encode(p, self.mask_parag_placeholder)
-        q_out = self.encoder.encode(q, self.mask_ques_placeholder)
-        m_out = self.matcher.match(p_out, q_out)
-        
+        p_mask = self.p_mask_placeholder
+        q_mask = self.q_mask_placeholder
+        p_outs, p_finals = self.encoder.encode(p, self.p_mask_placeholder, self.p_actual_len_placeholder)
+        q_outs, q_finals = self.encoder.encode(q, self.q_mask_placeholder, self.q_actual_len_placeholder)
+        m_out = self.matcher.match(p_outs, p_finals, q_outs, q_finals)
+        self.scores = self.decoder.decode(m_out, self.p_actual_len_placeholder)
 
     def setup_loss(self):
         """
@@ -214,7 +221,7 @@ class QASystem(object):
         :return:
         """
         with tf.variable_scope("loss"):
-            pass
+            
 
     def setup_embeddings(self):
         """
@@ -223,10 +230,10 @@ class QASystem(object):
         """
         with tf.variable_scope("embeddings"):
             embedding_tensor = tf.Variable(np.load(self.embed_path)["glove"])
-            p_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.parag_placeholder)
-            p_embeddings = tf.reshape(p_embeddings, [-1, Config.max_parag_len, self.embed_size])
-            q_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.ques_placeholder)
-            q_embeddings = tf.reshape(q_embeddings, [-1, Config.max_ques_len, self.embed_size])
+            p_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.p_placeholder)
+            p_embeddings = tf.reshape(p_embeddings, [-1, Config.max_p_len, self.embed_size])
+            q_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.q_placeholder)
+            q_embeddings = tf.reshape(q_embeddings, [-1, Config.max_q_len, self.embed_size])
         return p_embeddings, q_embeddings
 
     def optimize(self, session, train_x, train_y):
@@ -237,8 +244,9 @@ class QASystem(object):
         """
         input_feed = self.get_feed_dict(train_x, train_y)
         opt = get_optimizer("adam")()
+        # Gradient clipping here !!!
         train_op = opt.minimize(self.loss)
-        output_feed = [train_op, ...]
+        output_feed = [train_op]
         outputs = session.run(output_feed, input_feed)
 
         return outputs
@@ -329,7 +337,7 @@ class QASystem(object):
             logging.info("F1: {}, EM: {}, for {} samples".format(f1, em, sample))
 
         return f1, em
-    
+
     def run_epoch(self, session, data_x, data_y, **kwargs ):
         for batch_x, batch_y in iterate_across(data_x, data_y, Config.batch_size):
             ?, ?, ?, ? = self.optimize(..., ..) # sess.run([cost, pred, eval_op], feed)
@@ -368,16 +376,16 @@ class QASystem(object):
         tic = time.time()
         params = tf.trainable_variables()
         num_params = sum(map(lambda t: np.prod(tf.shape(t.value()).eval()), params))
-        
+
         # 1. Pad train data
-        parag, ques, span = dataset["train"]
-        parag, mask_parag = pad_input(parag, Config.max_parag_len)
-        ques, mask_ques = pad_input(ques, Config.max_ques_len)
+        p, q, span = dataset["train"]
+        p, mask_p, actual_p = pad_input(p, Config.max_p_len)
+        q, mask_q, actual_q = pad_input(q, Config.max_q_len)
         begin, end = zip(*span)
         # 2. Pad val data
- 
+
         # 3. iterate, run_epoch
-        #????? = self.run_epoch(session, [parag, mask_parag, ques, mask_ques], [begin, end], ...)
+        #????? = self.run_epoch(session, [p, mask_p, actual_p q, mask_q,, actual_q], [begin, end], ...)
         # use self.optimize
 
         toc = time.time()
