@@ -122,8 +122,10 @@ def main(_):
 
         save_train_dir = get_normalized_train_dir(FLAGS.train_dir)
         tf.global_variables_initializer().run()
+        graph_writer = tf.summary.FileWriter("qa-graph")
+        graph_writer.add_graph(sess.graph)
         qa.train(sess, dataset, save_train_dir)
-
+   
         qa.evaluate_answer(sess, dataset, 500, log=True)
 
 if __name__ == "__main__":

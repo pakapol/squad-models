@@ -72,7 +72,7 @@ def iterate_across(padded_x, padded_y=None, batch_size=1):
     data_len = len(padded_x[0])
     index_shuffler = list(range(data_len))
     random.shuffle(index_shuffler)
-    while curr < data_len:
+    while curr < data_len and curr < 1000:
         if padded_y is not None:
             yield [np.array([padded_x[i][j] \
                    for j in index_shuffler[curr:curr+batch_size]]) \
@@ -266,7 +266,8 @@ class QASystem(object):
         :return:
         """
         with tf.variable_scope("embeddings"), tf.device("/cpu:0"):
-            embedding_tensor = tf.Variable(np.load(self.embed_path)["glove"].astype(np.float32))
+            print("EMBEDDING", self.embed_path, np.load(self.embed_path)["glove"])
+            self.et = embedding_tensor = tf.Variable(np.load(self.embed_path)["glove"].astype(np.float32))
             p_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.p_placeholder)
             self.p = tf.reshape(p_embeddings, [-1, Config.max_p_len, self.embed_size])
             q_embeddings = tf.nn.embedding_lookup(embedding_tensor, self.q_placeholder)
@@ -303,10 +304,10 @@ class QASystem(object):
         :return:
         """
         input_feed = self.get_feed_dict(test_x)
-        output_feed = [self.begin_score, self.end_score]
-        outputs = sess.run(output_feed, input_feed)
-
-        return outputs
+        output_feed = [self.begin_score, self.end_score, self.et]
+        begin_out, end_out, et = sess.run(output_feed, input_feed)
+        print(et)
+        return begin_out, end_out
 
     def answer(self, sess, test_x):
         yp, yp2 = self.decode(sess, test_x)
@@ -377,7 +378,7 @@ class QASystem(object):
             if num_same > 0:
                 f1 += 2.0 * (num_same) / (len(pred_ans) + len(actual_ans))
         if log:
-            logging.info("F1: {}, EM: {}, for {} samples".format(f1, em, sample))
+            logging.info("F1: {}, EM: {}, for {} samples".format(f1/sample , em/sample, sample))
 
         return f1 / sample, em / sample
 
