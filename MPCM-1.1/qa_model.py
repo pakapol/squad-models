@@ -19,7 +19,7 @@ class Config:
     max_p_len = 768
     max_grad_norm = 10.
     batch_size = 192
-    max_epoch = 15
+    max_epoch = 80
     dropout_keep_prob = 0.85
     embed_size = 300 # should adjust by retrieving embed_size directly
 
@@ -72,7 +72,7 @@ def iterate_across(padded_x, padded_y=None, batch_size=1):
     data_len = len(padded_x[0])
     index_shuffler = list(range(data_len))
     random.shuffle(index_shuffler)
-    while curr < data_len: # and curr < 1000: <-- for debugging purpose
+    while curr < data_len: # and curr < 1000: # for debugging purpose
         if padded_y is not None:
             yield [np.array([padded_x[i][j] \
                    for j in index_shuffler[curr:curr+batch_size]]) \
@@ -211,7 +211,7 @@ class QASystem(object):
 
 
         # ==== set up training/updating procedure ====
-        optimizer = get_optimizer("adam")() # figure out a way to use adam
+        optimizer = get_optimizer("adam")(learning_rate=0.0001) # figure out a way to use adam
         # Gradient clipping
         grads_and_vars = optimizer.compute_gradients(self.loss)
         grads, tvars = zip(*grads_and_vars)
@@ -387,7 +387,8 @@ class QASystem(object):
                 f1 += 2.0 * (num_same) / (len(pred_ans) + len(actual_ans))
         if log:
             logging.info("F1: {}, EM: {}, for {} samples".format(f1/sample , em/sample, sample))
-
+        for a, b in zip(zip(begin,end), zip(a_s,a_e))[:6]:
+            print("Actual: {} Predicted: {}".format(a,b))
         return f1 / sample, em / sample
 
     def train_epoch(self, sess, data_x, data_y):
